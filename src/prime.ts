@@ -1,4 +1,4 @@
-import { bigintByteLength, modpow } from "./utils.ts";
+import { bigintByteLength, modpow, bytesToBigint } from "./utils.ts";
 
 /**
  * Precomputed small primes up to 1000 for trial division.
@@ -212,7 +212,7 @@ export function getPrime(options: GetPrimeOptions = {}): bigint {
 		// Set low bit to ensure odd
 		x[x.length - 1] = x[x.length - 1]! | 1;
 
-		let p = BigInt(`0x${Buffer.from(x).toString("hex")}`);
+		let p = bytesToBigint(x);
 		const aligned = alignToWheel(p);
 
 		if (aligned.p > max) {

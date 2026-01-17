@@ -67,8 +67,7 @@ export function bigintToBytes(x: bigint): Uint8Array {
  */
 export function bigintByteLength(x: bigint): number {
 	if (x === 0n) return 1;
-	// toString(16) is highly optimized in JS engines
-	return Math.ceil(x.toString(16).length / 2);
+	return (x.toString(16).length + 1) >> 1;
 }
 
 /**
@@ -76,10 +75,7 @@ export function bigintByteLength(x: bigint): number {
  */
 export function bigintBitLength(x: bigint): number {
 	if (x === 0n) return 0;
-	const bytes = bigintByteLength(x);
-	const shift = BigInt((bytes - 1) * 8);
-	const msb = Number((x >> shift) & 0xffn);
-	return (bytes - 1) * 8 + (32 - Math.clz32(msb));
+	return x.toString(2).length;
 }
 
 /**
@@ -106,7 +102,6 @@ export function bytesToBigint(bytes: Uint8Array): bigint {
 	return BigInt(`0x${Buffer.from(bytes).toString("hex")}`);
 }
 
-// Windowed modular exponentiation tuning.
 const MODPOW_WINDOW_THRESHOLD_BITS = 64;
 const MODPOW_MONTGOMERY_THRESHOLD_N_BITS = 1024;
 const MODPOW_MONTGOMERY_THRESHOLD_EXP_BITS = 128;
@@ -320,35 +315,35 @@ export function modpowProduct(
  */
 export class MontgomeryReducer {
 	public readonly n: bigint;
-	private readonly rBits: number;
-	private readonly rMask: bigint;
-	private readonly nPrime: bigint;
-	private readonly r: bigint;
+	public readonly rBits: number;
+	public readonly rBitsBigint: bigint;
+	public readonly rMask: bigint;
+	public readonly nPrime: bigint;
+	public readonly r2: bigint;
 
 	constructor(n: bigint) {
 		this.n = n;
-		// Choose R as power of 2 > n
-		this.rBits = n.toString(2).length;
-		if (1n << BigInt(this.rBits) <= n) {
-			this.rBits++;
-		}
-		this.r = 1n << BigInt(this.rBits);
-		this.rMask = this.r - 1n;
+		const nBits = n.toString(2).length;
+		this.rBits = ((nBits + 63) >> 6) << 6;
+		this.rBitsBigint = BigInt(this.rBits);
+		this.rMask = (1n << this.rBitsBigint) - 1n;
 		this.nPrime = this.computeNPrime();
+		const r = 1n << this.rBitsBigint;
+		this.r2 = (r * r) % n;
 	}
 
+	/** Compute n' such that n * n' ≡ -1 (mod R) */
 	private computeNPrime(): bigint {
-		// Compute n' such that n * n' ≡ -1 (mod R)
 		let nInv = 1n;
-		for (let i = 0; i < this.rBits; i++) {
+		for (let i = 0; i < 7; i++) {
 			nInv = (nInv * (2n - this.n * nInv)) & this.rMask;
 		}
-		return (this.r - nInv) & this.rMask;
+		return -nInv & this.rMask;
 	}
 
 	/** Convert x to Montgomery form: x * R mod n */
 	toMontgomery(x: bigint): bigint {
-		return (x * this.r) % this.n;
+		return this.reduce(x * this.r2);
 	}
 
 	/** Convert from Montgomery form: x * R^-1 mod n */
@@ -357,9 +352,9 @@ export class MontgomeryReducer {
 	}
 
 	/** Montgomery reduction: compute x * R^-1 mod n */
-	private reduce(x: bigint): bigint {
+	reduce(x: bigint): bigint {
 		const m = ((x & this.rMask) * this.nPrime) & this.rMask;
-		const t = (x + m * this.n) >> BigInt(this.rBits);
+		const t = (x + m * this.n) >> this.rBitsBigint;
 		return t >= this.n ? t - this.n : t;
 	}
 
@@ -373,3 +368,5 @@ export class MontgomeryReducer {
 		return this.reduce(a * a);
 	}
 }
+
+export const PRECOMPUTED_MONTGOMERY: Map<bigint, MontgomeryReducer> = new Map();

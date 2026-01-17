@@ -8,6 +8,7 @@ import {
 	concatBytes,
 	u64be,
 	MontgomeryReducer,
+	PRECOMPUTED_MONTGOMERY,
 } from "./utils.ts";
 import { isPrime, nextPrime } from "./prime.ts";
 
@@ -31,6 +32,13 @@ export const RSA_3072 =
  */
 export const RSA_4096 =
 	747352962051197730297934919296234225189963654905354427935353846101556895653541386541113520324263294236545904951060839962240274328375769020274431343912159134032165179555313439967918389676450595794483961040941009764122804794391046181942378647240304779972800690260262458348432539960153442657440901219540972943438653104032458070568153835275543015109580808966986224704918221024659890631684764229276547856850956248069577074873655045641411730285176021174124881403213574051977133606281732412418110713517515403558206281426502307580805475595646318182131891740149180223766312249910746627476702983991742718162876076881178303622511590593201630576134594272015989973633963594696486662570772886452272875842074410973837076866917833535886485424053178508915192831696893924147315437442669203873331664056119890477640884789110398626309285007167528107151236086156213498812507448284884702425573571668426362484661294563894216561407502197042527165655552237164601552270513010824469002566905851820787653065990471601308759319433849706433417940795470233138004510961817143010200050242333170912109749939932325818168759208959845084239707593225093832222693592214393944838071322068559847352433869357261322929618870704385679303841709580866230005780921498919331589072271n;
+
+function initPrecomputedMontgomery() {
+	for (const n of [RSA_2048, RSA_3072, RSA_4096]) {
+		PRECOMPUTED_MONTGOMERY.set(n, new MontgomeryReducer(n));
+	}
+}
+initPrecomputedMontgomery();
 
 export interface VDFParams {
 	/** RSA modulus n */
@@ -59,21 +67,20 @@ export interface VDFProof extends VDFOutput {
 	nonce: Uint8Array;
 }
 
-// Cache for Montgomery reducers (keyed by modulus)
-const montgomeryCache = new Map<bigint, MontgomeryReducer>();
-
-// Threshold for using Montgomery multiplication
-// Constructor takes ~O(2*bits) bigint multiplications, so needs high t to amortize
-const MONTGOMERY_THRESHOLD_T = 5000;
+const MONTGOMERY_THRESHOLD_T = 1000;
 const MONTGOMERY_THRESHOLD_N_BITS = 1024;
 
 const CHALLENGE_TAG = new TextEncoder().encode("wesolowski-v1");
 
+const montgomeryCache = new Map<bigint, MontgomeryReducer>();
+
 function getMontgomeryReducer(n: bigint): MontgomeryReducer {
-	let reducer = montgomeryCache.get(n);
+	let reducer = PRECOMPUTED_MONTGOMERY.get(n);
+	if (reducer) return reducer;
+
+	reducer = montgomeryCache.get(n);
 	if (!reducer) {
 		reducer = new MontgomeryReducer(n);
-		// Only cache common moduli to avoid memory bloat
 		if (montgomeryCache.size < 10) {
 			montgomeryCache.set(n, reducer);
 		}
@@ -82,6 +89,9 @@ function getMontgomeryReducer(n: bigint): MontgomeryReducer {
 }
 
 function shouldUseMontgomery(n: bigint, t: number): boolean {
+	if (PRECOMPUTED_MONTGOMERY.has(n)) {
+		return t >= 100;
+	}
 	if (t < MONTGOMERY_THRESHOLD_T) {
 		return false;
 	}
@@ -115,17 +125,23 @@ export function evaluate(x: bigint, params: VDFParams): VDFOutput {
 		throw new RangeError("t must be positive");
 	}
 
-	// Use Montgomery multiplication for large moduli and high iteration counts
 	if (shouldUseMontgomery(n, t)) {
 		const mont = getMontgomeryReducer(n);
+		const rMask = mont.rMask;
+		const nPrime = mont.nPrime;
+		const rBits = mont.rBitsBigint;
+		const modN = mont.n;
+
 		let h = mont.toMontgomery(x);
 		for (let i = 0; i < t; i++) {
-			h = mont.square(h);
+			const prod = h * h;
+			const m = ((prod & rMask) * nPrime) & rMask;
+			const u = (prod + m * modN) >> rBits;
+			h = u >= modN ? u - modN : u;
 		}
 		return { x, h: mont.fromMontgomery(h), t, n };
 	}
 
-	// Standard squaring for smaller values
 	let h = x;
 	for (let i = 0; i < t; i++) {
 		h = (h * h) % n;
@@ -188,21 +204,30 @@ export async function deriveChallenge(
 export function prove(output: VDFOutput, l: bigint): bigint {
 	const { x, t, n } = output;
 
-	// Compute π = x^⌊2^t / l⌋ using long division in the exponent.
-	// Since r < l, r2 = 2r < 2l, so b = floor(r2 / l) is always 0 or 1.
 	if (shouldUseMontgomery(n, t)) {
 		const mont = getMontgomeryReducer(n);
+		const rMask = mont.rMask;
+		const nPrime = mont.nPrime;
+		const rBits = mont.rBitsBigint;
+		const modN = mont.n;
+
 		const xMont = mont.toMontgomery(x);
 		let pi = mont.toMontgomery(1n);
 		let r = 1n;
 
 		for (let i = 0; i < t; i++) {
-			pi = mont.square(pi);
+			let prod = pi * pi;
+			let m = ((prod & rMask) * nPrime) & rMask;
+			let u = (prod + m * modN) >> rBits;
+			pi = u >= modN ? u - modN : u;
 
 			const r2 = r << 1n;
 			if (r2 >= l) {
 				r = r2 - l;
-				pi = mont.multiply(pi, xMont);
+				prod = pi * xMont;
+				m = ((prod & rMask) * nPrime) & rMask;
+				u = (prod + m * modN) >> rBits;
+				pi = u >= modN ? u - modN : u;
 			} else {
 				r = r2;
 			}
