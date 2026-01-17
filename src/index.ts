@@ -50,10 +50,12 @@ export {
 // Low-level utilities (for advanced usage)
 export {
   modpow,
+  modpowProduct,
   gcd,
   bigintToBytes,
   bytesToBigint,
   bigintByteLength,
+  bigintBitLength,
   bigintToFixedBytes,
   concatBytes,
   u32be,

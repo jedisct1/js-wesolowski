@@ -72,6 +72,17 @@ export function bigintByteLength(x: bigint): number {
 }
 
 /**
+ * Get the bit length required to represent a bigint.
+ */
+export function bigintBitLength(x: bigint): number {
+  if (x === 0n) return 0;
+  const bytes = bigintByteLength(x);
+  const shift = BigInt((bytes - 1) * 8);
+  const msb = Number((x >> shift) & 0xffn);
+  return (bytes - 1) * 8 + (32 - Math.clz32(msb));
+}
+
+/**
  * Convert a bigint to a fixed-length byte array (zero-padded on the left).
  */
 export function bigintToFixedBytes(x: bigint, len: number): Uint8Array {
@@ -95,24 +106,212 @@ export function bytesToBigint(bytes: Uint8Array): bigint {
   return BigInt("0x" + Buffer.from(bytes).toString("hex"));
 }
 
+// Windowed modular exponentiation tuning.
+const MODPOW_WINDOW_THRESHOLD_BITS = 64;
+const MODPOW_MONTGOMERY_THRESHOLD_N_BITS = 1024;
+const MODPOW_MONTGOMERY_THRESHOLD_EXP_BITS = 128;
+
+const MODPOW_MONTGOMERY_CACHE_LIMIT = 10;
+const modpowMontgomeryCache = new Map<bigint, MontgomeryReducer>();
+
+function getMontgomeryReducerCached(n: bigint): MontgomeryReducer {
+  let reducer = modpowMontgomeryCache.get(n);
+  if (!reducer) {
+    reducer = new MontgomeryReducer(n);
+    if (modpowMontgomeryCache.size < MODPOW_MONTGOMERY_CACHE_LIMIT) {
+      modpowMontgomeryCache.set(n, reducer);
+    }
+  }
+  return reducer;
+}
+
+function shouldUseMontgomeryForModpow(n: bigint, expBits: number): boolean {
+  if ((n & 1n) === 0n) return false;
+  if (expBits < MODPOW_MONTGOMERY_THRESHOLD_EXP_BITS) return false;
+  const nBits = bigintByteLength(n) * 8;
+  return nBits >= MODPOW_MONTGOMERY_THRESHOLD_N_BITS;
+}
+
+function selectWindowSize(expBits: number): number {
+  if (expBits <= 32) return 1;
+  if (expBits <= 96) return 3;
+  if (expBits <= 384) return 4;
+  if (expBits <= 1024) return 5;
+  return 6;
+}
+
+function modpowClassic(base: bigint, exp: bigint, mod: bigint): bigint {
+  let res = 1n;
+  let x = base;
+  let y = exp;
+  while (y > 0n) {
+    if (y & 1n) {
+      res = (res * x) % mod;
+    }
+    y >>= 1n;
+    if (y > 0n) {
+      x = (x * x) % mod;
+    }
+  }
+  return res;
+}
+
+function modpowWindowedCore(
+  base: bigint,
+  bits: string,
+  window: number,
+  square: (x: bigint) => bigint,
+  multiply: (a: bigint, b: bigint) => bigint,
+  one: bigint
+): bigint {
+  const tableSize = 1 << window;
+  const table = new Array<bigint>(tableSize);
+  table[1] = base;
+
+  if (tableSize > 2) {
+    const base2 = square(base);
+    for (let i = 3; i < tableSize; i += 2) {
+      table[i] = multiply(table[i - 2]!, base2);
+    }
+  }
+
+  let result = one;
+  let i = 0;
+  const bitLen = bits.length;
+
+  while (i < bitLen) {
+    if (bits.charCodeAt(i) === 48) {
+      result = square(result);
+      i++;
+      continue;
+    }
+
+    let j = Math.min(i + window, bitLen);
+    while (bits.charCodeAt(j - 1) === 48) {
+      j--;
+    }
+
+    let win = 0;
+    for (let k = i; k < j; k++) {
+      win = (win << 1) | (bits.charCodeAt(k) === 49 ? 1 : 0);
+    }
+
+    for (let k = i; k < j; k++) {
+      result = square(result);
+    }
+    result = multiply(result, table[win]!);
+    i = j;
+  }
+
+  return result;
+}
+
 /**
  * Modular exponentiation: compute x^y mod p using square-and-multiply.
  */
 export function modpow(x: bigint, y: bigint, p: bigint): bigint {
-  if (y === 0n) return 1n;
+  if (p === 1n) return 0n;
+  if (y === 0n) return 1n % p;
   if (y === 1n) return x % p;
-  if (y === 2n) return (x * x) % p;
-
-  let res = 1n;
-  x = x % p;
-  while (y > 0n) {
-    if (y & 1n) {
-      res = (res * x) % p;
-    }
-    y >>= 1n; // Faster than division
-    x = (x * x) % p;
+  if (y === 2n) {
+    const v = x % p;
+    return (v * v) % p;
   }
-  return res;
+
+  let base = x % p;
+  const expBits = bigintBitLength(y);
+
+  if (expBits <= MODPOW_WINDOW_THRESHOLD_BITS) {
+    return modpowClassic(base, y, p);
+  }
+
+  const window = selectWindowSize(expBits);
+  const bits = y.toString(2);
+
+  if (shouldUseMontgomeryForModpow(p, expBits)) {
+    const mont = getMontgomeryReducerCached(p);
+    const baseMont = mont.toMontgomery(base);
+    const oneMont = mont.toMontgomery(1n);
+    const resultMont = modpowWindowedCore(
+      baseMont,
+      bits,
+      window,
+      (a) => mont.square(a),
+      (a, b) => mont.multiply(a, b),
+      oneMont
+    );
+    return mont.fromMontgomery(resultMont);
+  }
+
+  return modpowWindowedCore(
+    base,
+    bits,
+    window,
+    (a) => (a * a) % p,
+    (a, b) => (a * b) % p,
+    1n
+  );
+}
+
+/**
+ * Simultaneous exponentiation: compute a^e * b^f mod m efficiently.
+ */
+export function modpowProduct(
+  a: bigint,
+  e: bigint,
+  b: bigint,
+  f: bigint,
+  m: bigint
+): bigint {
+  if (m === 1n) return 0n;
+  if (e === 0n) return modpow(b, f, m);
+  if (f === 0n) return modpow(a, e, m);
+
+  let baseA = a % m;
+  let baseB = b % m;
+
+  const eBits = bigintBitLength(e);
+  const fBits = bigintBitLength(f);
+  const maxBits = Math.max(eBits, fBits);
+
+  if (shouldUseMontgomeryForModpow(m, maxBits)) {
+    const mont = getMontgomeryReducerCached(m);
+    const oneMont = mont.toMontgomery(1n);
+    const aMont = mont.toMontgomery(baseA);
+    const bMont = mont.toMontgomery(baseB);
+    const abMont = mont.multiply(aMont, bMont);
+
+    let result = oneMont;
+    for (let i = maxBits - 1; i >= 0; i--) {
+      result = mont.square(result);
+      const ea = (e >> BigInt(i)) & 1n;
+      const fb = (f >> BigInt(i)) & 1n;
+      if (ea === 1n && fb === 1n) {
+        result = mont.multiply(result, abMont);
+      } else if (ea === 1n) {
+        result = mont.multiply(result, aMont);
+      } else if (fb === 1n) {
+        result = mont.multiply(result, bMont);
+      }
+    }
+    return mont.fromMontgomery(result);
+  }
+
+  const ab = (baseA * baseB) % m;
+  let result = 1n;
+  for (let i = maxBits - 1; i >= 0; i--) {
+    result = (result * result) % m;
+    const ea = (e >> BigInt(i)) & 1n;
+    const fb = (f >> BigInt(i)) & 1n;
+    if (ea === 1n && fb === 1n) {
+      result = (result * ab) % m;
+    } else if (ea === 1n) {
+      result = (result * baseA) % m;
+    } else if (fb === 1n) {
+      result = (result * baseB) % m;
+    }
+  }
+  return result;
 }
 
 /**

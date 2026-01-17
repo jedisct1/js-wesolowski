@@ -1,6 +1,7 @@
 import {
   gcd,
   modpow,
+  modpowProduct,
   bigintByteLength,
   bigintToFixedBytes,
   bytesToBigint,
@@ -285,7 +286,7 @@ export function verify(proof: VDFProof): boolean {
   const r = modpow(2n, BigInt(t), l);
 
   // Verify π^l · x^r ≡ h (mod n)
-  const expected = (modpow(pi, l, n) * modpow(x, r, n)) % n;
+  const expected = modpowProduct(pi, l, x, r, n);
   return expected === h;
 }
 
