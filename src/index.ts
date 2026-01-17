@@ -24,40 +24,40 @@
 
 // Main VDF functions
 export {
-  evaluate,
-  deriveChallenge,
-  prove,
-  generateProof,
-  verify,
-  verifyWithChallenge,
-  RSA_2048,
-  RSA_3072,
-  RSA_4096,
-  type VDFParams,
-  type VDFOutput,
-  type VDFProof,
+	evaluate,
+	deriveChallenge,
+	prove,
+	generateProof,
+	verify,
+	verifyWithChallenge,
+	RSA_2048,
+	RSA_3072,
+	RSA_4096,
+	type VDFParams,
+	type VDFOutput,
+	type VDFProof,
 } from "./vdf.ts";
 
 // Prime utilities (for advanced usage)
 export {
-  isPrime,
-  getPrime,
-  nextPrime,
-  type IsPrimeOptions,
-  type GetPrimeOptions,
+	isPrime,
+	getPrime,
+	nextPrime,
+	type IsPrimeOptions,
+	type GetPrimeOptions,
 } from "./prime.ts";
 
 // Low-level utilities (for advanced usage)
 export {
-  modpow,
-  modpowProduct,
-  gcd,
-  bigintToBytes,
-  bytesToBigint,
-  bigintByteLength,
-  bigintBitLength,
-  bigintToFixedBytes,
-  concatBytes,
-  u32be,
-  u64be,
+	modpow,
+	modpowProduct,
+	gcd,
+	bigintToBytes,
+	bytesToBigint,
+	bigintByteLength,
+	bigintBitLength,
+	bigintToFixedBytes,
+	concatBytes,
+	u32be,
+	u64be,
 } from "./utils.ts";
