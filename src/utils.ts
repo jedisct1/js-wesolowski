@@ -335,7 +335,8 @@ export class MontgomeryReducer {
 	/** Compute n' such that n * n' ≡ -1 (mod R) */
 	private computeNPrime(): bigint {
 		let nInv = 1n;
-		for (let i = 0; i < 7; i++) {
+		const numIterations = Math.max(7, Math.ceil(Math.log2(this.rBits)) + 1);
+		for (let i = 0; i < numIterations; i++) {
 			nInv = (nInv * (2n - this.n * nInv)) & this.rMask;
 		}
 		return -nInv & this.rMask;
