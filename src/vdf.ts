@@ -3,6 +3,7 @@ import {
 	modpow,
 	modpowProduct,
 	bigintByteLength,
+	bigintBitLength,
 	bigintToFixedBytes,
 	bytesToBigint,
 	concatBytes,
@@ -69,9 +70,13 @@ export interface VDFProof extends VDFOutput {
 
 const MONTGOMERY_THRESHOLD_T = 1000;
 const MONTGOMERY_THRESHOLD_N_BITS = 1024;
+const PROOF_DIRECT_EXPONENT_LIMIT_T = 1_000_000;
 
 const CHALLENGE_TAG = new TextEncoder().encode("wesolowski-v1");
+const CHALLENGE_PRIME_CACHE_LIMIT = 128;
 
+const challengeCache = new Map<bigint, bigint>();
+const challengePrimeCache = new Set<bigint>();
 const montgomeryCache = new Map<bigint, MontgomeryReducer>();
 
 function getMontgomeryReducer(n: bigint): MontgomeryReducer {
@@ -187,7 +192,17 @@ export async function deriveChallenge(
 	);
 
 	const hashBigint = bytesToBigint(new Uint8Array(hash));
-	return nextPrime(hashBigint);
+	const cachedChallenge = challengeCache.get(hashBigint);
+	if (cachedChallenge !== undefined) {
+		return cachedChallenge;
+	}
+
+	const challenge = nextPrime(hashBigint);
+	if (challengeCache.size < CHALLENGE_PRIME_CACHE_LIMIT) {
+		challengeCache.set(hashBigint, challenge);
+		challengePrimeCache.add(challenge);
+	}
+	return challenge;
 }
 
 /**
@@ -203,6 +218,14 @@ export async function deriveChallenge(
  */
 export function prove(output: VDFOutput, l: bigint): bigint {
 	const { x, t, n } = output;
+
+	if (l > 0n && t < bigintBitLength(l)) {
+		return 1n;
+	}
+	if (l > 0n && t <= PROOF_DIRECT_EXPONENT_LIMIT_T) {
+		const q = (1n << BigInt(t)) / l;
+		return modpow(x, q, n);
+	}
 
 	if (shouldUseMontgomery(n, t)) {
 		const mont = getMontgomeryReducer(n);
@@ -290,10 +313,12 @@ export async function generateProof(
  * @param proof - The proof to verify
  * @returns true if the proof is valid
  */
-export function verify(proof: VDFProof): boolean {
+function verifyProofEquation(
+	proof: VDFProof,
+	challengeAlreadyVerified: boolean,
+): boolean {
 	const { x, h, t, n, pi, l } = proof;
 
-	// Validate inputs
 	if (pi <= 0n || pi >= n) {
 		return false;
 	}
@@ -303,16 +328,20 @@ export function verify(proof: VDFProof): boolean {
 	if (gcd(x, n) !== 1n) {
 		return false;
 	}
-	if (l <= 2n || !isPrime(l)) {
+	if (
+		l <= 2n ||
+		(!challengeAlreadyVerified && !challengePrimeCache.has(l) && !isPrime(l))
+	) {
 		return false;
 	}
 
-	// Compute r = 2^t mod l
 	const r = modpow(2n, BigInt(t), l);
-
-	// Verify π^l · x^r ≡ h (mod n)
 	const expected = modpowProduct(pi, l, x, r, n);
 	return expected === h;
+}
+
+export function verify(proof: VDFProof): boolean {
+	return verifyProofEquation(proof, false);
 }
 
 /**
@@ -334,5 +363,5 @@ export async function verifyWithChallenge(proof: VDFProof): Promise<boolean> {
 		return false;
 	}
 
-	return verify(proof);
+	return verifyProofEquation(proof, true);
 }

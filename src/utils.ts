@@ -264,29 +264,46 @@ export function modpowProduct(
 
 	const baseA = a % m;
 	const baseB = b % m;
-
-	const eBits = bigintBitLength(e);
-	const fBits = bigintBitLength(f);
-	const maxBits = Math.max(eBits, fBits);
+	const eText = e.toString(2);
+	const fText = f.toString(2);
+	const eOffset = fText.length > eText.length ? fText.length - eText.length : 0;
+	const fOffset = eText.length > fText.length ? eText.length - fText.length : 0;
+	const maxBits = Math.max(eText.length, fText.length);
 
 	if (shouldUseMontgomeryForModpow(m, maxBits)) {
 		const mont = getMontgomeryReducerCached(m);
-		const oneMont = mont.toMontgomery(1n);
+		const rMask = mont.rMask;
+		const nPrime = mont.nPrime;
+		const rBits = mont.rBitsBigint;
+		const modN = mont.n;
 		const aMont = mont.toMontgomery(baseA);
 		const bMont = mont.toMontgomery(baseB);
 		const abMont = mont.multiply(aMont, bMont);
 
-		let result = oneMont;
-		for (let i = maxBits - 1; i >= 0; i--) {
-			result = mont.square(result);
-			const ea = (e >> BigInt(i)) & 1n;
-			const fb = (f >> BigInt(i)) & 1n;
-			if (ea === 1n && fb === 1n) {
-				result = mont.multiply(result, abMont);
-			} else if (ea === 1n) {
-				result = mont.multiply(result, aMont);
-			} else if (fb === 1n) {
-				result = mont.multiply(result, bMont);
+		let result = mont.toMontgomery(1n);
+		for (let i = 0; i < maxBits; i++) {
+			let prod = result * result;
+			let mm = ((prod & rMask) * nPrime) & rMask;
+			let u = (prod + mm * modN) >> rBits;
+			result = u >= modN ? u - modN : u;
+
+			const ea = i >= eOffset && eText.charCodeAt(i - eOffset) === 49;
+			const fb = i >= fOffset && fText.charCodeAt(i - fOffset) === 49;
+			if (ea && fb) {
+				prod = result * abMont;
+				mm = ((prod & rMask) * nPrime) & rMask;
+				u = (prod + mm * modN) >> rBits;
+				result = u >= modN ? u - modN : u;
+			} else if (ea) {
+				prod = result * aMont;
+				mm = ((prod & rMask) * nPrime) & rMask;
+				u = (prod + mm * modN) >> rBits;
+				result = u >= modN ? u - modN : u;
+			} else if (fb) {
+				prod = result * bMont;
+				mm = ((prod & rMask) * nPrime) & rMask;
+				u = (prod + mm * modN) >> rBits;
+				result = u >= modN ? u - modN : u;
 			}
 		}
 		return mont.fromMontgomery(result);
@@ -294,15 +311,15 @@ export function modpowProduct(
 
 	const ab = (baseA * baseB) % m;
 	let result = 1n;
-	for (let i = maxBits - 1; i >= 0; i--) {
+	for (let i = 0; i < maxBits; i++) {
 		result = (result * result) % m;
-		const ea = (e >> BigInt(i)) & 1n;
-		const fb = (f >> BigInt(i)) & 1n;
-		if (ea === 1n && fb === 1n) {
+		const ea = i >= eOffset && eText.charCodeAt(i - eOffset) === 49;
+		const fb = i >= fOffset && fText.charCodeAt(i - fOffset) === 49;
+		if (ea && fb) {
 			result = (result * ab) % m;
-		} else if (ea === 1n) {
+		} else if (ea) {
 			result = (result * baseA) % m;
-		} else if (fb === 1n) {
+		} else if (fb) {
 			result = (result * baseB) % m;
 		}
 	}
