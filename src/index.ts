@@ -47,7 +47,19 @@ export {
 	type GetPrimeOptions,
 } from "./prime.ts";
 
-// Low-level utilities (for advanced usage)
+export {
+	createPowServer,
+	solveChallenge,
+	InMemoryReplayStore,
+	MAX_POW_REQUEST_BYTES,
+	type PowChallenge,
+	type PowSolution,
+	type PowServer,
+	type PowServerOptions,
+	type SolveChallengeOptions,
+	type ConsumeChallenge,
+} from "./pow.ts";
+
 export {
 	modpow,
 	modpowProduct,

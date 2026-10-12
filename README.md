@@ -36,6 +36,55 @@ const valid = verify(proof);
 bun run examples/basic.ts
 ```
 
+## Website proof of work
+
+For single-use access challenges, use the high-level API rather than accepting a client-supplied VDF proof directly.
+Create one issuer/verifier at **server startup** (this configuration is for a single process):
+
+```ts
+import { createPowServer, InMemoryReplayStore } from "wesolowski-vdf";
+
+const replay = new InMemoryReplayStore();
+const pow = await createPowServer({
+  secret: crypto.getRandomValues(new Uint8Array(32)),
+  iterations: 100_000,
+  consume: replay.consume,
+});
+```
+
+Issue a challenge for the server's expected action and session:
+
+```ts
+const context = JSON.stringify(["GET", "/members", session.id]);
+const challenge = await pow.createChallenge(context);
+```
+
+In a **browser worker**, solve the JSON-decoded challenge:
+
+```ts
+import { solveChallenge } from "wesolowski-vdf";
+
+const solution = await solveChallenge(challenge);
+```
+
+On the server, reconstruct the expected context and verify the submitted JSON before granting access:
+
+```ts
+const context = JSON.stringify(["GET", "/members", session.id]);
+const accepted = await pow.verifySolution(body.challenge, body.solution, context);
+```
+
+The server authenticates all work parameters, enforces expiration and request binding, and requires an atomic one-time claim before accepting a solution.
+The client cannot choose the input, modulus, difficulty, or proof nonce.
+Production replicas need a shared durable replay store and a server-only signing key; the in-memory example rotates its key on restart.
+Enforce the exported `MAX_POW_REQUEST_BYTES` HTTP body limit before parsing submissions.
+
+A VDF prevents splitting one fresh evaluation into independent parallel searches, not solving multiple challenges concurrently.
+Keep ordinary rate limits and calibrate difficulty using evaluation time alone, assuming optimized adversaries retain checkpoints.
+
+See the [web integration guide](docs/WEB_POW.md) for the full API, shared-store example, browser requirements, and security limits.
+Run `bun run examples/pow-server.ts` for a local browser demo that solves in a Web Worker.
+
 ## Performance
 
 Pass the object returned by `evaluate()` directly to `generateProof()` or `prove()` for the fastest proof generation.

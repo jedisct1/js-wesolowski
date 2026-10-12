@@ -54,12 +54,23 @@ export function concatBytes(...parts: Uint8Array[]): Uint8Array {
  * Convert a bigint to its minimal byte representation.
  */
 export function bigintToBytes(x: bigint): Uint8Array {
+	if (x < 0n) throw new RangeError("bigint must be nonnegative");
 	if (x === 0n) {
 		return new Uint8Array([0]);
 	}
 	let hex = x.toString(16);
 	if (hex.length % 2 === 1) hex = `0${hex}`;
-	return new Uint8Array(Buffer.from(hex, "hex"));
+	if (typeof Uint8Array.fromHex === "function") {
+		return Uint8Array.fromHex(hex);
+	}
+	if (typeof Buffer !== "undefined") {
+		return new Uint8Array(Buffer.from(hex, "hex"));
+	}
+	const bytes = new Uint8Array(hex.length / 2);
+	for (let i = 0; i < bytes.length; i++) {
+		bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+	}
+	return bytes;
 }
 
 /**
@@ -99,7 +110,17 @@ export function bigintToFixedBytes(x: bigint, len: number): Uint8Array {
  */
 export function bytesToBigint(bytes: Uint8Array): bigint {
 	if (bytes.length === 0) return 0n;
-	return BigInt(`0x${Buffer.from(bytes).toString("hex")}`);
+	if (typeof bytes.toHex === "function") {
+		return BigInt(`0x${bytes.toHex()}`);
+	}
+	if (typeof Buffer !== "undefined") {
+		return BigInt(`0x${Buffer.from(bytes).toString("hex")}`);
+	}
+	let hex = "";
+	for (const byte of bytes) {
+		hex += byte.toString(16).padStart(2, "0");
+	}
+	return BigInt(`0x${hex}`);
 }
 
 const MODPOW_WINDOW_THRESHOLD_BITS = 64;

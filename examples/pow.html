@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>VDF access demo</title>
+	<style>
+		body { font: 1rem/1.6 system-ui, sans-serif; max-width: 42rem; margin: 3rem auto; padding: 0 1rem; }
+		button { font: inherit; padding: .5rem 1rem; cursor: pointer; }
+		button:disabled { cursor: default; }
+		#content { white-space: pre-wrap; overflow-wrap: anywhere; }
+	</style>
+</head>
+<body>
+	<h1>VDF access demo</h1>
+	<p>Solve a short proof of work to fetch protected content. The CPU work runs in a Web Worker, so you can still use this page while it runs.</p>
+	<p>This is a local, single-process example, not a production abuse-prevention system.</p>
+	<button id="access" type="button">Get protected content</button>
+	<button id="cancel" type="button" disabled>Cancel</button>
+	<p id="status" role="status">Ready. Each request needs a fresh, single-use ticket.</p>
+	<pre id="content" aria-live="polite"></pre>
+	<script type="module">
+		const accessButton = document.querySelector("#access");
+		const cancelButton = document.querySelector("#cancel");
+		const status = document.querySelector("#status");
+		const content = document.querySelector("#content");
+		let worker;
+		let controller;
+
+		function stopWorker() {
+			worker?.terminate();
+			worker = undefined;
+		}
+
+		function solve(challenge, signal) {
+			return new Promise((resolve, reject) => {
+				if (signal.aborted) {
+					reject(new DOMException("Cancelled", "AbortError"));
+					return;
+				}
+				worker = new Worker("/pow-worker.js", { type: "module" });
+				function finish(error, solution) {
+					signal.removeEventListener("abort", cancel);
+					stopWorker();
+					if (error) reject(error);
+					else resolve(solution);
+				}
+				function cancel() {
+					finish(new DOMException("Cancelled", "AbortError"));
+				}
+				signal.addEventListener("abort", cancel, { once: true });
+				worker.onmessage = ({ data }) => {
+					if (data?.solution) finish(null, data.solution);
+					else finish(new Error("Could not solve this challenge. Try again."));
+				};
+				worker.onerror = (event) => {
+					event.preventDefault();
+					finish(new Error("The proof worker failed. Try again."));
+				};
+				worker.onmessageerror = () => finish(new Error("Could not read the worker response."));
+				try {
+					worker.postMessage(challenge);
+				} catch (error) {
+					finish(error);
+				}
+			});
+		}
+
+		async function readResponse(response) {
+			const data = await response.json();
+			if (!response.ok) throw new Error(data.error ?? `Request failed (${response.status}).`);
+			return data;
+		}
+
+		accessButton.addEventListener("click", async () => {
+			accessButton.disabled = true;
+			cancelButton.disabled = false;
+			content.textContent = "";
+			controller = new AbortController();
+			const { signal } = controller;
+			try {
+				status.textContent = "Requesting a challenge…";
+				const challenge = await readResponse(await fetch("/challenge", { signal, cache: "no-store" }));
+				status.textContent = "Solving in a worker. You can cancel while it runs…";
+				const solution = await solve(challenge, signal);
+				status.textContent = "Verifying and consuming the ticket…";
+				const result = await readResponse(await fetch("/protected", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ challenge, solution }),
+					signal,
+				}));
+				content.textContent = result.content;
+				status.textContent = "Access granted for this response. The ticket cannot be reused.";
+			} catch (error) {
+				status.textContent = error.name === "AbortError" ? "Cancelled. You can request a new challenge." : error.message;
+			} finally {
+				stopWorker();
+				controller = undefined;
+				accessButton.disabled = false;
+				cancelButton.disabled = true;
+			}
+		});
+
+		cancelButton.addEventListener("click", () => controller?.abort());
+		window.addEventListener("pagehide", () => {
+			controller?.abort();
+			stopWorker();
+		});
+	</script>
+</body>
+</html>
