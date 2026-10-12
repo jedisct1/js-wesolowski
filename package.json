@@ -17,6 +17,7 @@
 	],
 	"scripts": {
 		"test": "bun test",
+		"bench": "bun run benchmarks/vdf.ts",
 		"typecheck": "tsc --noEmit",
 		"example": "bun run examples/basic.ts"
 	},

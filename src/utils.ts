@@ -386,5 +386,3 @@ export class MontgomeryReducer {
 		return this.reduce(a * a);
 	}
 }
-
-export const PRECOMPUTED_MONTGOMERY: Map<bigint, MontgomeryReducer> = new Map();

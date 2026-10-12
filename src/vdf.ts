@@ -9,7 +9,6 @@ import {
 	concatBytes,
 	u64be,
 	MontgomeryReducer,
-	PRECOMPUTED_MONTGOMERY,
 } from "./utils.ts";
 import { isPrime, nextPrime } from "./prime.ts";
 
@@ -34,12 +33,9 @@ export const RSA_3072 =
 export const RSA_4096 =
 	747352962051197730297934919296234225189963654905354427935353846101556895653541386541113520324263294236545904951060839962240274328375769020274431343912159134032165179555313439967918389676450595794483961040941009764122804794391046181942378647240304779972800690260262458348432539960153442657440901219540972943438653104032458070568153835275543015109580808966986224704918221024659890631684764229276547856850956248069577074873655045641411730285176021174124881403213574051977133606281732412418110713517515403558206281426502307580805475595646318182131891740149180223766312249910746627476702983991742718162876076881178303622511590593201630576134594272015989973633963594696486662570772886452272875842074410973837076866917833535886485424053178508915192831696893924147315437442669203873331664056119890477640884789110398626309285007167528107151236086156213498812507448284884702425573571668426362484661294563894216561407502197042527165655552237164601552270513010824469002566905851820787653065990471601308759319433849706433417940795470233138004510961817143010200050242333170912109749939932325818168759208959845084239707593225093832222693592214393944838071322068559847352433869357261322929618870704385679303841709580866230005780921498919331589072271n;
 
-function initPrecomputedMontgomery() {
-	for (const n of [RSA_2048, RSA_3072, RSA_4096]) {
-		PRECOMPUTED_MONTGOMERY.set(n, new MontgomeryReducer(n));
-	}
-}
-initPrecomputedMontgomery();
+const precomputedMontgomery = new Map(
+	[RSA_2048, RSA_3072, RSA_4096].map((n) => [n, new MontgomeryReducer(n)]),
+);
 
 export interface VDFParams {
 	/** RSA modulus n */
@@ -71,6 +67,18 @@ export interface VDFProof extends VDFOutput {
 const MONTGOMERY_THRESHOLD_T = 1000;
 const MONTGOMERY_THRESHOLD_N_BITS = 1024;
 const PROOF_DIRECT_EXPONENT_LIMIT_T = 1_000_000;
+const PROOF_CHECKPOINT_LIMIT = 1024;
+
+interface ProofCheckpoints {
+	x: bigint;
+	n: bigint;
+	t: number;
+	powers: bigint[];
+	stride: number;
+	mont: MontgomeryReducer;
+}
+
+const proofCheckpoints = new WeakMap<VDFOutput, ProofCheckpoints>();
 
 const CHALLENGE_TAG = new TextEncoder().encode("wesolowski-v1");
 const CHALLENGE_PRIME_CACHE_LIMIT = 128;
@@ -80,7 +88,7 @@ const challengePrimeCache = new Set<bigint>();
 const montgomeryCache = new Map<bigint, MontgomeryReducer>();
 
 function getMontgomeryReducer(n: bigint): MontgomeryReducer {
-	let reducer = PRECOMPUTED_MONTGOMERY.get(n);
+	let reducer = precomputedMontgomery.get(n);
 	if (reducer) return reducer;
 
 	reducer = montgomeryCache.get(n);
@@ -94,7 +102,7 @@ function getMontgomeryReducer(n: bigint): MontgomeryReducer {
 }
 
 function shouldUseMontgomery(n: bigint, t: number): boolean {
-	if (PRECOMPUTED_MONTGOMERY.has(n)) {
+	if (precomputedMontgomery.has(n)) {
 		return t >= 100;
 	}
 	if (t < MONTGOMERY_THRESHOLD_T) {
@@ -112,6 +120,8 @@ function shouldUseMontgomery(n: bigint, t: number): boolean {
  *
  * This requires t sequential squarings and cannot be parallelized.
  * The computation time grows linearly with t.
+ * RSA-sized evaluations with 1,000 <= t <= 1,000,000 retain up to 1,024
+ * intermediate powers while the returned object is alive to accelerate proving.
  *
  * @param x - Input value (must be coprime to n)
  * @param params - VDF parameters (n, t)
@@ -137,14 +147,27 @@ export function evaluate(x: bigint, params: VDFParams): VDFOutput {
 		const rBits = mont.rBitsBigint;
 		const modN = mont.n;
 
+		const powers: bigint[] | undefined =
+			Number.isSafeInteger(t) && t >= 1000 && t <= PROOF_DIRECT_EXPONENT_LIMIT_T
+				? []
+				: undefined;
+		const stride = powers
+			? Math.max(16, Math.ceil(t / PROOF_CHECKPOINT_LIMIT / 4) * 4)
+			: t;
 		let h = mont.toMontgomery(x);
-		for (let i = 0; i < t; i++) {
-			const prod = h * h;
-			const m = ((prod & rMask) * nPrime) & rMask;
-			const u = (prod + m * modN) >> rBits;
-			h = u >= modN ? u - modN : u;
+		for (let start = 0; start < t; start += stride) {
+			powers?.push(h);
+			const end = Math.min(start + stride, t);
+			for (let i = start; i < end; i++) {
+				const prod = h * h;
+				const m = ((prod & rMask) * nPrime) & rMask;
+				const u = (prod + m * modN) >> rBits;
+				h = u >= modN ? u - modN : u;
+			}
 		}
-		return { x, h: mont.fromMontgomery(h), t, n };
+		const output = { x, h: mont.fromMontgomery(h), t, n };
+		if (powers) proofCheckpoints.set(output, { x, n, t, powers, stride, mont });
+		return output;
 	}
 
 	let h = x;
@@ -205,12 +228,48 @@ export async function deriveChallenge(
 	return challenge;
 }
 
+function proveWithCheckpoints(
+	checkpoints: ProofCheckpoints,
+	q: bigint,
+): bigint {
+	const { powers, stride, mont } = checkpoints;
+	const hex = q.toString(16);
+	const digits = stride / 4;
+	const one = mont.toMontgomery(1n);
+	let result = one;
+
+	for (let window = digits - 1; window >= 0; window--) {
+		for (let j = 0; j < 4; j++) result = mont.square(result);
+		const buckets = new Array<bigint | undefined>(16);
+		for (let i = 0; i < powers.length; i++) {
+			const index = hex.length - 1 - i * digits - window;
+			if (index < 0) break;
+			const code = hex.charCodeAt(index);
+			const digit = code > 57 ? code - 87 : code - 48;
+			if (digit !== 0) {
+				const bucket = buckets[digit];
+				buckets[digit] =
+					bucket === undefined ? powers[i]! : mont.multiply(bucket, powers[i]!);
+			}
+		}
+
+		// Descending products give each bucket its digit as an exponent.
+		let running = one;
+		for (let digit = 15; digit > 0; digit--) {
+			const bucket = buckets[digit];
+			if (bucket !== undefined) running = mont.multiply(running, bucket);
+			result = mont.multiply(result, running);
+		}
+	}
+	return mont.fromMontgomery(result);
+}
+
 /**
  * Generate a Wesolowski proof for a VDF output.
  *
  * The proof π = x^⌊2^t / l⌋ mod n enables efficient verification.
- * Computing the proof requires t iterations but can be parallelized
- * with the main VDF computation.
+ * Reuses evaluation checkpoints when available, otherwise computes
+ * the exponent directly or uses streaming long division for very large t.
  *
  * @param output - VDF output to prove
  * @param l - Challenge prime from verifier
@@ -219,13 +278,25 @@ export async function deriveChallenge(
 export function prove(output: VDFOutput, l: bigint): bigint {
 	const { x, t, n } = output;
 
-	if (l > 0n && t < bigintBitLength(l)) {
+	if (l > 0n && t < bigintBitLength(l) - 1) {
 		return 1n;
 	}
 	if (l > 0n && t <= PROOF_DIRECT_EXPONENT_LIMIT_T) {
 		const q = (1n << BigInt(t)) / l;
+		const checkpoints = proofCheckpoints.get(output);
+		if (
+			l > 1n &&
+			checkpoints &&
+			checkpoints.x === x &&
+			checkpoints.n === n &&
+			checkpoints.t === t
+		) {
+			return proveWithCheckpoints(checkpoints, q);
+		}
 		return modpow(x, q, n);
 	}
+
+	if (l === 1n) return evaluate(x, { n, t }).h;
 
 	if (shouldUseMontgomery(n, t)) {
 		const mont = getMontgomeryReducer(n);

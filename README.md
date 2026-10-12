@@ -36,6 +36,13 @@ const valid = verify(proof);
 bun run examples/basic.ts
 ```
 
+## Performance
+
+Pass the object returned by `evaluate()` directly to `generateProof()` or `prove()` for the fastest proof generation.
+For RSA-sized odd moduli and 1,000 ≤ `t` ≤ 1,000,000, evaluation retains up to 1,024 intermediate powers and the prover combines them instead of repeating most of the squarings.
+
+All `t` sequential evaluation steps still run, and the proof format and challenge derivation are unchanged.
+
 ## API
 
 ### Core Functions
@@ -76,7 +83,7 @@ const valid = await verifyWithChallenge(proof);
 
 ### Constants
 
-Three RSA moduli are provided at different security levels:
+Three RSA-sized moduli are provided:
 
 ```typescript
 import { RSA_2048, RSA_3072, RSA_4096 } from "wesolowski-vdf";
@@ -88,7 +95,10 @@ import { RSA_2048, RSA_3072, RSA_4096 } from "wesolowski-vdf";
 | `RSA_3072` | 3072 | Deterministic (seed: `wesolowski-vdf-3072-v1`) |
 | `RSA_4096` | 4096 | Deterministic (seed: `wesolowski-vdf-4096-v1`) |
 
-`RSA_2048` is from the RSA Factoring Challenge with unknown factorization. `RSA_3072` and `RSA_4096` are generated deterministically by hashing the seed with SHA-512 to derive two primes of half the target size.
+`RSA_2048` is from the RSA Factoring Challenge with unknown factorization.
+`RSA_3072` and `RSA_4096` are documented as generated deterministically by hashing public seeds to derive their factors.
+Treat those two constants as arithmetic and interoperability fixtures, not as secure VDF parameters: reproducible factors would defeat the delay assumption.
+A production VDF needs a modulus whose factorization is unknown.
 
 ### Prime Utilities
 
